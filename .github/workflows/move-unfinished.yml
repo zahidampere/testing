@@ -1,0 +1,21 @@
+name: 🚚 Carry unfinished items forward
+
+on:
+  schedule:
+    # runs Monday at 05:00 UTC
+    - cron: '0 5 * * MON'
+  workflow_dispatch:    # enables the “Run workflow” button
+
+jobs:
+  move-to-next-iteration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: blombard/move-to-next-iteration@v0.6.1
+        with:
+          owner:            AmpereEV
+          number:           18
+          token:            ${{ secrets.PROJECT_PAT }}
+          iteration-field:  Iteration
+          iteration:        last
+          new-iteration:    current
+          excluded-statuses: Done
