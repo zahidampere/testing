@@ -1,27 +1,107 @@
-# .github/workflows/move-unfinished.yml
-name: 🚚 Carry unfinished cards into Current sprint
+# .github/workflows/move-all-past-unfinished.yml
+name: 🚚 Carry past-sprint unfinished cards into Current sprint
 
 on:
-  # Runs every Monday at 05:00 UTC
   schedule:
     - cron: '0 5 * * MON'
-  # Allows you to click “Run workflow” manually
   workflow_dispatch:
-  # Also runs on every push to main (handy for testing)
   push:
     branches:
       - main
 
 jobs:
-  move-to-next-iteration:
+  move-past:
     runs-on: ubuntu-latest
     steps:
-      - uses: blombard/move-to-next-iteration@v0.6.1
+      - uses: actions/github-script@v6
         with:
-          owner:            zahidampere         # your GitHub username/ORG
-          number:           1                   # project ID from /projects/1
-          token:            ${{ secrets.PROJECT_PAT }}
-          iteration-field:  Sprint              # the exact name of your sprint field
-          iteration:        last                # look in the iteration immediately before “Current”
-          new-iteration:    current             # retag into the “Current” iteration
-          excluded-statuses: Done               # skip anything already marked Done
+          github-token: ${{ secrets.PROJECT_PAT }}
+          script: |
+            const owner         = 'zahidampere';
+            const projectNumber = 1;
+
+            // 1) Fetch project, its Sprint & Status fields, plus all iterations & items
+            const { user: { projectV2 } } = await github.graphql(`
+              query($owner:String!,$number:Int!){
+                user(login:$owner){
+                  projectV2(number:$number){
+                    id
+                    fields(first:20){
+                      nodes {
+                        ... on ProjectV2IterationField {
+                          id name
+                          iterations(first:50){
+                            nodes { id title status }
+                          }
+                        }
+                        ... on ProjectV2SingleSelectField {
+                          id name
+                        }
+                      }
+                    }
+                    items(first:100){
+                      nodes{
+                        id
+                        fieldValues(first:50){
+                          nodes{
+                            ... on ProjectV2ItemFieldIterationValue {
+                              field { ... on ProjectV2IterationField { id name } }
+                              value { id }
+                            }
+                            ... on ProjectV2ItemFieldSingleSelectValue {
+                              field { ... on ProjectV2SingleSelectField { id name } }
+                              name
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }`, { owner, number: projectNumber });
+
+            // 2) Identify your Sprint iteration field and your Status field
+            const sprintField = projectV2.fields.nodes.find(f => f.name === 'Sprint');
+            const statusField = projectV2.fields.nodes.find(f => f.name === 'Status');
+
+            // 3) From that, find:
+            //    A) the one ACTIVE iteration  (your “Current” sprint)
+            const currentIter = sprintField.iterations.nodes.find(i => i.status === 'ACTIVE');
+            if (!currentIter) throw new Error('No Active sprint found!');
+
+            //    B) all COMPLETED iteration IDs (past sprints)
+            const pastIterIds = sprintField.iterations.nodes
+              .filter(i => i.status === 'COMPLETED')
+              .map(i => i.id);
+
+            // 4) Now sweep through every card
+            for (const item of projectV2.items.nodes) {
+              const values = item.fieldValues.nodes;
+              const iterVal = values.find(v => v.field.id === sprintField.id);
+              const statVal = values.find(v => v.field.id === statusField.id);
+
+              const isDone    = statVal?.name === 'Done';
+              const inCurrent = iterVal?.value?.id === currentIter.id;
+              const inPast    = pastIterIds.includes(iterVal?.value?.id);
+
+              // Only move cards that:
+              //  • are in a past sprint (inPast),
+              //  • are not already in the current sprint (!inCurrent),
+              //  • are not marked Done (!isDone)
+              if (inPast && !inCurrent && !isDone) {
+                await github.graphql(`
+                  mutation($input: UpdateProjectV2ItemFieldValueInput!){
+                    updateProjectV2ItemFieldValue(input:$input){
+                      projectV2Item{ id }
+                    }
+                  }`, {
+                  input: {
+                    projectId: projectV2.id,
+                    itemId:    item.id,
+                    fieldId:   sprintField.id,
+                    value:     currentIter.id
+                  }
+                });
+                console.log(\`Moved item \${item.id} from a past sprint into \${currentIter.title}\`);
+              }
+            }
